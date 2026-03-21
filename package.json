@@ -1,0 +1,23 @@
+{
+  "name": "mini-claude-code",
+  "module": "index.ts",
+  "type": "module",
+  "devDependencies": {
+    "@biomejs/biome": "2.4.7",
+    "@types/bun": "latest",
+    "ultracite": "7.3.2"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "^3.0.41",
+    "@ai-sdk/provider-utils": "^4.0.19",
+    "openai": "^6.32.0"
+  },
+  "scripts": {
+    "check": "ultracite check",
+    "fix": "ultracite fix",
+    "dev": "bun run agents/s03_todo_write.ts"
+  }
+}
