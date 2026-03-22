@@ -100,18 +100,20 @@ async function agentLoop(messages: ChatCompletionMessageParam[]) {
   }
 }
 
-console.log("请输入内容后按回车...");
-for await (const chunk of Bun.stdin.stream()) {
-  const chunkText = Buffer.from(chunk).toString();
-  console.log(`[user]: ${chunkText}`);
+if (import.meta.main) {
+  console.log("请输入内容后按回车...");
+  for await (const chunk of Bun.stdin.stream()) {
+    const chunkText = Buffer.from(chunk).toString();
+    console.log(`[user]: ${chunkText}`);
 
-  const messages: ChatCompletionMessageParam[] = [{ role: "user", content: chunkText }];
-  const res = await agentLoop(messages);
-  await Bun.write("result.json", JSON.stringify(res, null, 2));
-  console.log("完成");
+    const messages: ChatCompletionMessageParam[] = [{ role: "user", content: chunkText }];
+    const res = await agentLoop(messages);
+    await Bun.write("result.json", JSON.stringify(res, null, 2));
+    console.log("完成");
+  }
+
+  // 1. 创建一个名为 hello.py 的文件，并打印“Hello, World!”。
+  // 2. 列出此目录中的所有 Python 文件。
+  // 3. 当前 git 分支是什么？
+  // 4. 创建一个名为 test_output 的目录，并在其中写入 3 个文件。
 }
-
-// 1. 创建一个名为 hello.py 的文件，并打印“Hello, World!”。
-// 2. 列出此目录中的所有 Python 文件。
-// 3. 当前 git 分支是什么？
-// 4. 创建一个名为 test_output 的目录，并在其中写入 3 个文件。

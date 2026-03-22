@@ -1,92 +1,134 @@
-// Harness：规划——无需编写脚本即可保持模型按计划运行。
-// s03_todo_write - TodoWrite
-// 模型通过 TodoManager 跟踪自身的进度。烦人的提醒会强制它在忘记更新时持续更新。
-//     +----------+      +-------+      +---------+
-//     |   User   | ---> |  LLM  | ---> | Tools   |
-//     |  prompt  |      |       |      | + todo  |
-//     +----------+      +---+---+      +----+----+
-//                           ^               |
-//                           |   tool_result |
-//                           +---------------+
-//                                 |
-//                     +-----------+-----------+
-//                     | TodoManager state     |
-//                     | [ ] task A            |
-//                     | [>] task B <- doing   |
-//                     | [x] task C            |
-//                     +-----------------------+
-//                                 |
-//                     if rounds_since_todo >= 3:
-//                       inject <reminder>
+// Harness: 按需知识——领域专业知识，在模型需要时加载。
+// s05_skill_loading - Skills
 
-// 关键见解：“代理可以跟踪自己的进度——而且我可以看到它。”
+// 避免系统提示信息臃肿的双层技能注入：
 
+// 第一层（低成本）：系统提示符中显示技能名称（每个技能约 100 个token）
+// 第二层（按需）：工具结果中显示完整的技能描述
+
+//     skills/
+//       pdf/
+//         SKILL.md          <-- frontmatter (name, description) + body
+//       code-review/
+//         SKILL.md
+
+//     System prompt:
+//     +--------------------------------------+
+//     | You are a coding agent.              |
+//     | Skills available:                    |
+//     |   - pdf: Process PDF files...        |  <-- Layer 1: metadata only
+//     |   - code-review: Review code...      |
+//     +--------------------------------------+
+
+//     When model calls load_skill("pdf"):
+//     +--------------------------------------+
+//     | tool_result:                         |
+//     | <skill>                              |
+//     |   Full PDF processing instructions   |  <-- Layer 2: full body
+//     |   Step 1: ...                        |
+//     |   Step 2: ...                        |
+//     | </skill>                             |
+//     +--------------------------------------+
+
+import fs from "node:fs";
+// 关键见解：“不要把所有东西都放在系统提示符里。按需加载。”
 import path from "node:path";
 import * as Bun from "bun";
 import type { ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources";
 import { client } from "./provider";
 
-interface TodoItem {
-  id: string;
-  status: "pending" | "in_progress" | "completed";
-  text: string;
+interface Skill {
+  body: string;
+  meta: Record<string, string>;
+  path: string;
 }
 
 const WORKDIR = process.cwd();
+const SKILLS_DIR = path.resolve(WORKDIR, "skills");
+const LINE_REGX = /\r?\n/;
+const SKILL_METADATA_REGEX = /^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/;
 
-const system = `您是 ${WORKDIR} 的一名编码员。请使用待办事项工具规划多步骤任务。开始前标记为“进行中”，完成后标记为“已完成”。建议优先使用工具而非文字描述。`;
+class SkillLoader {
+  skillsDir: string;
+  skills: Map<string, Skill> = new Map();
 
-const regx = /\r?\n/;
-
-const statusMap = { pending: "[ ]", in_progress: "[>]", completed: "[x]" };
-
-class TodoManager {
-  items: TodoItem[];
-  constructor() {
-    this.items = [];
+  constructor({ skillsDir }: { skillsDir: string }) {
+    this.skillsDir = skillsDir;
+    this.loadAll();
   }
-  update = ({ items }: { items: TodoItem[] }) => {
-    if (items.length > 20) {
-      throw new Error("最多允许 20 个待办事项");
-    }
-    const validated: TodoItem[] = [];
-    let inProgressCount = 0;
-    for (const item of items) {
-      const text = (item.text || "").trim();
-      const status = (item.status || "pending").toLowerCase() as TodoItem["status"];
-      const itemId = item.id || String(items.indexOf(item) + 1);
-      if (!text) {
-        throw new Error(`Item ${itemId}: text required`);
-      }
-      if (!["pending", "in_progress", "completed"].includes(status)) {
-        throw new Error(`Item ${itemId}: invalid status '${status}'`);
-      }
-      if (status === "in_progress") {
-        inProgressCount++;
-      }
-      validated.push({ id: itemId, text, status });
-    }
-    if (inProgressCount > 1) {
-      throw new Error("同一时间只能有一个任务处于进行中状态");
-    }
-    this.items = validated;
-    return this.render();
-  };
 
-  render(): string {
-    if (!this.items.length) {
-      return "无待办项。";
+  private loadAll() {
+    if (!fs.existsSync(this.skillsDir)) {
+      return;
     }
-    const lines = this.items.map((item) => {
-      return `${statusMap[item.status]} #${item.id}: ${item.text}`;
-    });
-    const done = this.items.filter((t) => t.status === "completed").length;
-    lines.push(`\n(${done}/${this.items.length} completed)`);
+    const entries = fs.readdirSync(this.skillsDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        const skillPath = path.join(this.skillsDir, entry.name, "SKILL.md");
+        if (fs.existsSync(skillPath)) {
+          const skillContent = fs.readFileSync(skillPath, "utf-8");
+          const { meta, body } = this.parseFrontmatter(skillContent);
+          if (meta.name) {
+            this.skills.set(meta.name, { meta, body, path: skillPath });
+          }
+        }
+      }
+    }
+  }
+  /**
+   *
+   * 解析 --- 分隔符之间的 YAML 前置元数据。
+   */
+  private parseFrontmatter(text: string): { meta: Record<string, string>; body: string } {
+    const match = text.match(SKILL_METADATA_REGEX);
+    if (!match?.[1]) {
+      return { meta: {}, body: text.trim() };
+    }
+    const meta: Record<string, string> = {};
+    for (const line of match[1].trim().split("\n")) {
+      const idx = line.indexOf(":");
+      if (idx !== -1) {
+        const key = line.slice(0, idx).trim();
+        const value = line.slice(idx + 1).trim();
+        meta[key] = value;
+      }
+    }
+    return { meta, body: match[2]?.trim() ?? "" };
+  }
+  /*
+   * 第 1 层：系统提示符的简短描述。
+   */
+  getDescriptions() {
+    if (!this.skills.size) {
+      return "（暂无相关技能）";
+    }
+    const lines: string[] = [];
+    for (const [name, skill] of this.skills) {
+      const desc = skill.meta.description ?? "暂无描述";
+      const tags = skill.meta.tags ?? "";
+      lines.push(`  - ${name}: ${desc}${tags ? ` [${tags}]` : ""}`);
+    }
     return lines.join("\n");
   }
+  /*
+   * 第 2 层：工具结果中返回了完整的技能体。
+   */
+  getContent = ({ name }: { name: string }) => {
+    const skill = this.skills.get(name);
+    if (!skill) {
+      const available = Array.from(this.skills.keys()).join(", ");
+      return `Error: Unknown skill '${name}'. Available: ${available}`;
+    }
+    return `<skill name="${name}">\n${skill.body}\n</skill>`;
+  };
 }
 
-const todo = new TodoManager();
+const skillLoader = new SkillLoader({ skillsDir: SKILLS_DIR });
+
+const SYSTEM = `你是位于 ${WORKDIR} 的编码代理。在着手处理不熟悉的话题之前，请使用 load_skill 来获取专业知识。
+
+可用技能：
+${skillLoader.getDescriptions()}`;
 
 function safePath(p: string) {
   const safe = path.resolve(WORKDIR, p);
@@ -126,7 +168,7 @@ async function runBash({ command }: { command: string }) {
 async function runRead({ path: p, limit }: { path: string; limit?: number }) {
   try {
     const text = await Bun.file(safePath(p)).text();
-    let lines = text.split(regx);
+    let lines = text.split(LINE_REGX);
     if (limit && lines.length > limit) {
       lines = [...lines.slice(0, limit), `... (${lines.length - limit} more lines)`];
     }
@@ -183,7 +225,7 @@ const toolHandlers = {
   readFile: runRead,
   writeFile: runWrite,
   editFile: runEdit,
-  todo: todo.update,
+  loadSkill: skillLoader.getContent,
 };
 
 const tools: ChatCompletionTool[] = [
@@ -243,36 +285,22 @@ const tools: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
-      name: "todo",
-      description: "更新任务列表。跟踪多步骤任务的进度。",
+      name: "loadSkill",
+      description: "名称加载专业知识。",
       parameters: {
         type: "object",
-        properties: {
-          items: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                id: { type: "string" },
-                text: { type: "string" },
-                status: { type: "string", enum: ["pending", "in_progress", "completed"] },
-              },
-              required: ["id", "text", "status"],
-            },
-          },
-        },
-        required: ["items"],
+        properties: { name: { type: "string", description: "要加载的技能名称" } },
+        required: ["name"],
       },
     },
   },
 ];
 
 async function agentLoop(messages: ChatCompletionMessageParam[]) {
-  let roundsSinceTodo = 0;
   while (true) {
     const response = await client.chat.completions.create({
       model: "qwen3.5-plus",
-      messages: [{ role: "system", content: system }, ...messages],
+      messages: [{ role: "system", content: SYSTEM }, ...messages],
       tools,
     });
 
@@ -286,7 +314,6 @@ async function agentLoop(messages: ChatCompletionMessageParam[]) {
       return messages;
     }
 
-    let usedTodo = false;
     let content = "";
 
     console.log(
@@ -308,39 +335,30 @@ async function agentLoop(messages: ChatCompletionMessageParam[]) {
 
           content = await handler(args);
           console.log(`[tool] ${toolCall.function.name} 结果：${content}`);
-          if (toolCall.function.name === "todo") {
-            usedTodo = true;
-          }
         } catch (e) {
           content = `Error: ${e instanceof Error ? e.message : String(e)}`;
         }
         messages.push({ role: "tool", tool_call_id: toolCall.id, content });
       }
     }
-    roundsSinceTodo = usedTodo ? 0 : roundsSinceTodo + 1;
-
-    if (roundsSinceTodo >= 3) {
-      messages.push({ role: "user", content: "<reminder>更新你的待办事项。</reminder>" });
-    }
   }
 }
 
 if (import.meta.main) {
+  console.log(`${SYSTEM}\n`);
   console.log("请输入内容后按回车...");
   for await (const chunk of Bun.stdin.stream()) {
     const chunkText = Buffer.from(chunk).toString();
     console.log(`[user]: ${chunkText}`);
-
     const messages: ChatCompletionMessageParam[] = [{ role: "user", content: chunkText }];
     const result = await agentLoop(messages);
     await Bun.write("result.json", JSON.stringify(result, null, 2));
+    console.log(result.at(-1)?.content, "\n");
     console.log("完成");
   }
 }
 
-/**
- *
- * 1. 重构文件 hello.py：添加类型提示、文档字符串和主程序入口保护（if __name__ == '__main__':）
- * 2. 创建一个 Python 包，包含 __init__.py、utils.py 和 tests/test_utils.py
- * 3. 审查所有 Python 文件，并修复任何代码风格问题
- */
+// 1. 有哪些技能可用？
+// 2. 加载 agent-builder 技能并按照说明操作。
+// 3. 我需要进行代码审查——请先加载相关技能。
+// 4. 使用 mcp-builder 技能构建 MCP 服务器。

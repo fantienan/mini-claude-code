@@ -224,14 +224,15 @@ async function agentLoop(messages: ChatCompletionMessageParam[]) {
   }
 }
 
-console.log(`工作目录：${WORKDIR}`);
-console.log("请输入内容后按回车...");
-for await (const chunk of Bun.stdin.stream()) {
-  const chunkText = Buffer.from(chunk).toString();
-  console.log(`[user]: ${chunkText}`);
+if (import.meta.main) {
+  console.log("请输入内容后按回车...");
+  for await (const chunk of Bun.stdin.stream()) {
+    const chunkText = Buffer.from(chunk).toString();
+    console.log(`[user]: ${chunkText}`);
 
-  const messages: ChatCompletionMessageParam[] = [{ role: "user", content: chunkText }];
-  const result = await agentLoop(messages);
-  console.log(JSON.stringify(result, null, 2));
-  console.log("完成");
+    const messages: ChatCompletionMessageParam[] = [{ role: "user", content: chunkText }];
+    const result = await agentLoop(messages);
+    console.log(JSON.stringify(result, null, 2));
+    console.log("完成");
+  }
 }

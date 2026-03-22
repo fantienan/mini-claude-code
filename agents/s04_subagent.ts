@@ -188,11 +188,12 @@ const childTools: ChatCompletionTool[] = [
 
 // 子代理：提供最新上下文、筛选工具，仅返回摘要
 
-async function runSubagent(prompt: string) {
+async function runSubagent({ prompt }: { prompt: string }) {
   const subMessages: ChatCompletionMessageParam[] = [
     { role: "system", content: subagentSystem },
     { role: "user", content: prompt },
   ];
+  console.log(JSON.stringify(subMessages), "-----------");
   let textBlocks = "";
   for (let i = 0; i < 30; i++) {
     const response = await client.chat.completions.create({
@@ -216,7 +217,7 @@ async function runSubagent(prompt: string) {
     }
 
     console.log(
-      `调用工具: ${message.tool_calls
+      `子代理调用工具: ${message.tool_calls
         .filter((v) => v.type === "function")
         .map((v) => v.function.name)
         .join(", ")}`
@@ -231,12 +232,12 @@ async function runSubagent(prompt: string) {
             throw new Error(`未知工具 ${toolCall.function.name}`);
           }
 
-          console.log(`[tool] 执行 ${toolCall.function.name}。`);
+          console.log(`子代理[tool] 执行 ${toolCall.function.name}。`);
 
           content = await handler(args);
-          console.log(`[tool] ${toolCall.function.name} 结果：${content}`);
+          console.log(`子代理[tool] ${toolCall.function.name} 结果：${content}`);
         } catch (e) {
-          content = `Error: ${e instanceof Error ? e.message : String(e)}`;
+          content = `子代理 Error: ${e instanceof Error ? e.message : String(e)}`;
         }
         subMessages.push({ role: "tool", tool_call_id: toolCall.id, content });
       }
@@ -297,6 +298,7 @@ async function agentLoop(messages: ChatCompletionMessageParam[]) {
 
           if (toolCall.function.name === "task") {
             content = await runSubagent(args);
+            console.log(`子代理[tool] task 结果：${content}`);
           } else {
             const handler = toolHandlers[toolCall.function.name as keyof typeof toolHandlers];
             if (!handler) {
@@ -315,18 +317,19 @@ async function agentLoop(messages: ChatCompletionMessageParam[]) {
   }
 }
 
-console.log(`工作目录：${WORKDIR}`);
-console.log("请输入内容后按回车...");
-for await (const chunk of Bun.stdin.stream()) {
-  const chunkText = Buffer.from(chunk).toString();
-  console.log(`[user]: ${chunkText}`);
+if (import.meta.main) {
+  console.log(`工作目录：${WORKDIR}`);
+  console.log("请输入内容后按回车...");
+  for await (const chunk of Bun.stdin.stream()) {
+    const chunkText = Buffer.from(chunk).toString();
+    console.log(`[user]: ${chunkText}`);
 
-  const messages: ChatCompletionMessageParam[] = [{ role: "user", content: chunkText }];
-  const result = await agentLoop(messages);
-  await Bun.write("result.json", JSON.stringify(result, null, 2));
-  console.log("完成");
+    const messages: ChatCompletionMessageParam[] = [{ role: "user", content: chunkText }];
+    const result = await agentLoop(messages);
+    await Bun.write("result.json", JSON.stringify(result, null, 2));
+    console.log("完成");
+  }
 }
-
 // 1. 使用子任务查找此项目使用的测试框架。
 // 2. 委托：读取所有 .py 文件并总结每个文件的功能。
 // 3. 使用任务创建一个新模块，然后从此处验证它。
