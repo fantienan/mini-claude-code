@@ -30,8 +30,8 @@
 //     | </skill>                             |
 //     +--------------------------------------+
 
-import fs from "node:fs";
 // 关键见解：“不要把所有东西都放在系统提示符里。按需加载。”
+import fs from "node:fs";
 import path from "node:path";
 import * as Bun from "bun";
 import type { ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources";
